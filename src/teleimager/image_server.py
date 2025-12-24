@@ -1367,6 +1367,21 @@ def signal_handler(server, signum, frame):
     logger_mp.info(f"[Image Server] Received signal {signum}, initiating graceful shutdown...")
     server.stop()
 
+def set_performance_mode(cores=[0, 1, 2]):
+    import psutil
+    try:
+        p = psutil.Process(os.getpid())
+        
+        # Set CPU affinity for the process and all its threads
+        p.cpu_affinity(cores)
+        logger_mp.info(f"[Performance] CPU Affinity locked to: {cores}")
+
+    except psutil.AccessDenied:
+        logger_mp.warning("[Performance] Access Denied: Run as sudo for full optimization")
+    except Exception as e:
+        logger_mp.error(f"[Performance] Error: {e}")
+
+
 def main():
     logger_mp.info(
         "\n====================== Image Server Startup Guide ======================\n"
@@ -1392,7 +1407,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cf', action = 'store_true', help = 'Enable camera found mode, print all connected cameras info')
     parser.add_argument('--rs', action = 'store_true', help = 'Enable RealSense camera mode. Otherwise only find UVC/OpenCV cameras.')
+    parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Disable CPU affinity setting for performance optimization.')
     args = parser.parse_args()
+
+    if args.affinity:
+        set_performance_mode(cores=[0, 1, 2])
 
     # if enable camera finder mode, just print cameras info and exit
     if args.cf:
