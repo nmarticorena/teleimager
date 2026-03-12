@@ -8,4 +8,6 @@ build/
 *.csr
 *.key
 *.cnf
-*_client.yaml
+*_client.yaml# pixi environments
+.pixi/*
+!.pixi/config.toml
