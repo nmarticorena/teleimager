@@ -11,7 +11,7 @@ requires-python = ">=3.8,<3.12"
 dependencies = [
     "logging_mp",
     "opencv-python",
-    "numpy>=1.21,<2",
+    "numpy>2",
     "pyyaml",
     "pyzmq",
 ]

@@ -915,10 +915,10 @@ class ImageClient:
             if self._cam_config['head_camera']['enable_zmq']:
                 self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
 
-            if self._cam_config['left_wrist_camera']['enable_zmq']:
+            if self._cam_config.get('left_wrist_camera',{}).get('enable_zmq', False):
                 self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
 
-            if self._cam_config['right_wrist_camera']['enable_zmq']:
+            if self._cam_config.get('right_wrist_camera',{}).get('enable_zmq',False):
                 self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
         except Exception:
             if self._requester is not None:
