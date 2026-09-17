@@ -219,6 +219,28 @@ You will see separate OpenCV windows showing each camera stream.
 
 > Ensure `opencv-python` is installed.
 
+For a RealSense infrared stream, add a separate ZMQ port to that camera's server configuration:
+
+```yaml
+head_camera:
+  type: realsense
+  enable_ir: true
+  ir_zmq_port: 55556
+```
+
+Start the server with `--rs`, then request decoded frames from the client:
+
+```python
+from teleimager.image_client import ImageClient
+
+client = ImageClient(host="192.168.123.164", request_bgr=True)
+ir_image = client.get_head_ir_frame()  # Alias for get_ir_frame("head_camera")
+if ir_image.bgr is not None:
+    print(ir_image.bgr.shape)
+```
+
+The encoded grayscale JPEG is also available as `ir_image.jpg`.
+
 
 
 ### 2.2 🌀 Using WebRTC
