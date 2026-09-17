@@ -878,6 +878,15 @@ class BaseCamera:
            Before call this function, must first call get_frame() to update the latest depth data."""
         return None
 
+    def enable_ir(self):
+        return False
+
+    def get_ir_jpeg_bytes(self):
+        return None
+
+    def get_ir_zmq_port(self):
+        return None
+
     def get_zmq_port(self):
         """Return the zmq port number the camera is serving on."""
         return self._zmq_port
@@ -900,22 +909,40 @@ class BaseCamera:
 
 class RealSenseCamera(BaseCamera):
     def __init__(self, cam_topic, serial_number, img_shape, fps, 
-                 enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None, enable_depth=False):
+                 enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None, enable_depth=False,
+                 enable_ir=False, ir_zmq_port=None):
         rs = self.check_pyrealsense2_install()
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._serial_number = serial_number
         self._enable_depth = enable_depth
+        self._enable_ir = enable_ir
+        self._enable_color = self._enable_zmq or self._enable_webrtc
+        if self._enable_ir and self._enable_depth:
+            raise ValueError("Cannot enable both IR and Depth streams simultaneously.")
+        self._ir_zmq_port = ir_zmq_port
+        if self._enable_ir:
+            if self._ir_zmq_port is None:
+                raise ValueError("ir_zmq_port is required when enable_ir is true.")
+            if self._enable_zmq and self._ir_zmq_port == self._zmq_port:
+                raise ValueError("ir_zmq_port must differ from zmq_port.")
+            self._ir_zmq_buffer = TripleRingBuffer()
+        else:
+            self._ir_zmq_buffer = None
         self._latest_depth = None
+        self._latest_ir = None
         try:
-            align_to = rs.stream.color
-            self.align = rs.align(align_to)
+            self.align = rs.align(rs.stream.color) if self._enable_depth and self._enable_color else None
             self.pipeline = rs.pipeline()
+
             config = rs.config()
             config.enable_device(self._serial_number)
 
-            config.enable_stream(rs.stream.color, self._img_shape[1], self._img_shape[0], rs.format.bgr8, self._fps)
+            if self._enable_color:
+                config.enable_stream(rs.stream.color, self._img_shape[1], self._img_shape[0], rs.format.bgr8, self._fps)
             if self._enable_depth:
                 config.enable_stream(rs.stream.depth, self._img_shape[1], self._img_shape[0], rs.format.z16, self._fps)
+            if self._enable_ir:
+                config.enable_stream(rs.stream.infrared, 1, self._img_shape[1], self._img_shape[0], rs.format.y8, self._fps)
 
             profile = self.pipeline.start(config)
             self._device = profile.get_device()
@@ -926,7 +953,15 @@ class RealSenseCamera(BaseCamera):
                 depth_sensor = self._device.first_depth_sensor()
                 self.g_depth_scale = depth_sensor.get_depth_scale()
 
-            self.intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+            if self._enable_ir:
+                depth_sensor = self._device.first_depth_sensor()
+                if depth_sensor.supports(rs.option.emitter_enabled):
+                    depth_sensor.set_option(rs.option.emitter_enabled, 0)  # Avoid projected IR speckles.
+
+            if self._enable_color:
+                self.intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+            elif self._enable_ir:
+                self.intrinsics = profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile().get_intrinsics()
             logger_mp.info(str(self))
         except Exception as e:
             if self.pipeline:
@@ -941,7 +976,8 @@ class RealSenseCamera(BaseCamera):
             f"[RealSenseCamera: {self._cam_topic}] initialized with "
             f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
             f"ZMQ: {'enabled, zmq_port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
-            f"WebRTC: {'enabled, webrtc_port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
+            f"WebRTC: {'enabled, webrtc_port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}; "
+            f"IR: {'enabled, ir_zmq_port=' + str(self._ir_zmq_port) if self._enable_ir else 'disabled'}"
         )
 
     def check_pyrealsense2_install(self):
@@ -955,10 +991,7 @@ class RealSenseCamera(BaseCamera):
     
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames()
-        aligned_frames = self.align.process(frames)
-        color_frame = aligned_frames.get_color_frame()
-        if not color_frame:
-            return None
+        aligned_frames = self.align.process(frames) if self.align else frames
 
         if self._enable_depth:   
             depth_frame = aligned_frames.get_depth_frame()
@@ -967,23 +1000,48 @@ class RealSenseCamera(BaseCamera):
             else:
                 self._latest_depth = None
 
-        bgr_numpy = np.asanyarray(color_frame.get_data())
+        if self._enable_ir:
+            ir_frame = frames.get_infrared_frame(1)
+            if ir_frame:
+                self._latest_ir = np.asanyarray(ir_frame.get_data())
+                ok, buf = cv2.imencode(".jpg", self._latest_ir)
+                if ok:
+                    self._ir_zmq_buffer.write(buf.tobytes())
+            else:
+                self._latest_ir = None
 
-        if self._enable_webrtc:
-            self._webrtc_buffer.write(bgr_numpy)
-
-        if self._enable_zmq:
-            ok, buf = cv2.imencode(".jpg", bgr_numpy)
-            if ok:
-                self._zmq_buffer.write(buf.tobytes())
+        if self._enable_color:
+            color_frame = aligned_frames.get_color_frame()
+            if color_frame:
+                bgr_numpy = np.asanyarray(color_frame.get_data())
+                if self._enable_webrtc:
+                    self._webrtc_buffer.write(bgr_numpy)
+                if self._enable_zmq:
+                    ok, buf = cv2.imencode(".jpg", bgr_numpy)
+                    if ok:
+                        self._zmq_buffer.write(buf.tobytes())
         
-        if not self._ready.is_set():
+        if not self._ready.is_set() and (not self._enable_ir or self._latest_ir is not None):
             self._ready.set()
     
     def get_depth_frame(self):
         if self._latest_depth is None:
             return None
         return self._latest_depth.tobytes()
+
+    def get_ir_frame(self):
+        if self._latest_ir is None:
+            return None
+        return self._latest_ir.tobytes()
+
+    def enable_ir(self):
+        return self._enable_ir
+
+    def get_ir_jpeg_bytes(self):
+        return self._ir_zmq_buffer.read() if self._ir_zmq_buffer else None
+
+    def get_ir_zmq_port(self):
+        return self._ir_zmq_port
 
     def release(self):
         try:
@@ -1216,7 +1274,9 @@ class ImageServer:
         try:
             # Load cameras from self.cam_config
             for cam_topic, cam_cfg in self._cam_config.items():
-                if not cam_cfg.get("enable_zmq", False) and not cam_cfg.get("enable_webrtc", False):
+                if (not cam_cfg.get("enable_zmq", False)
+                        and not cam_cfg.get("enable_webrtc", False)
+                        and not cam_cfg.get("enable_ir", False)):
                     continue
 
                 enable_zmq = cam_cfg.get("enable_zmq", False)
@@ -1233,6 +1293,8 @@ class ImageServer:
                 video_path = f"/dev/video{video_id}" if video_id else None
                 physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
                 serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
+                enable_ir = cam_cfg.get("enable_ir", False)
+                ir_zmq_port = cam_cfg.get("ir_zmq_port")
 
                 if cam_type == "opencv":
                     if physical_path is not None:
@@ -1274,7 +1336,8 @@ class ImageServer:
                         logger_mp.error(f"[Image Server] Cannot find RealSenseCamera for {cam_topic}")
                     else:
                         self._cameras[cam_topic] = RealSenseCamera(cam_topic, serial_number, img_shape, fps,
-                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                   enable_ir=enable_ir, ir_zmq_port=ir_zmq_port)
 
                 elif cam_type == "uvc":
                     uid = None
@@ -1399,6 +1462,29 @@ class ImageServer:
             logger_mp.error(f"[Image Server] Failed to publish rtc frame from {cam_topic} camera.")
             self._stop_event.set()
 
+    def _ir_zmq_pub(self, cam_topic: str, camera: BaseCamera):
+        try:
+            interval = 1.0 / camera.get_fps()
+            next_frame_time = time.monotonic()
+            while not self._stop_event.is_set():
+                jpeg_bytes = camera.get_ir_jpeg_bytes()
+                if jpeg_bytes is not None:
+                    self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_ir_zmq_port())
+                else:
+                    logger_mp.warning(f"[Image Server] {cam_topic} returned no IR frame.")
+                    self._stop_event.set()
+                    break
+
+                next_frame_time += interval
+                sleep_time = next_frame_time - time.monotonic()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    next_frame_time = time.monotonic()
+        except Exception as e:
+            logger_mp.error(f"[Image Server] Failed to publish IR frame from {cam_topic} camera: {e}")
+            self._stop_event.set()
+
     def _clean_up(self):
         self._responser.stop()
         for t in self._publisher_threads:
@@ -1460,6 +1546,11 @@ class ImageServer:
 
             if camera.enable_zmq():
                 t = threading.Thread(target=self._zmq_pub, args=(camera_topic, camera), daemon=True)
+                t.start()
+                self._publisher_threads.append(t)
+
+            if camera.enable_ir():
+                t = threading.Thread(target=self._ir_zmq_pub, args=(camera_topic, camera), daemon=True)
                 t.start()
                 self._publisher_threads.append(t)
 

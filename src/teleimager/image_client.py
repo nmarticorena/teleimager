@@ -703,7 +703,13 @@ class ImageClient:
         if self._cam_config.get('right_wrist_camera',{}).get('enable_zmq',False):
             self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
 
-        if not self._cam_config['head_camera']['enable_zmq'] and not self._cam_config['head_camera']['enable_webrtc']:
+        for cam_cfg in self._cam_config.values():
+            if cam_cfg.get('enable_ir', False):
+                self._subscriber_manager.subscribe(self._host, cam_cfg['ir_zmq_port'], request_bgr=self._request_bgr)
+
+        if (not self._cam_config['head_camera']['enable_zmq']
+                and not self._cam_config['head_camera']['enable_webrtc']
+                and not self._cam_config['head_camera'].get('enable_ir', False)):
             logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
 
     # --------------------------------------------------------
@@ -720,6 +726,15 @@ class ImageClient:
     
     def get_right_wrist_frame(self):
         return self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
+
+    def get_ir_frame(self, camera_topic='head_camera'):
+        cam_cfg = self._cam_config.get(camera_topic)
+        if not cam_cfg or not cam_cfg.get('enable_ir', False):
+            raise ValueError(f"IR is not enabled for camera '{camera_topic}'.")
+        return self._subscriber_manager.subscribe(self._host, cam_cfg['ir_zmq_port'], request_bgr=self._request_bgr)
+
+    def get_head_ir_frame(self):
+        return self.get_ir_frame('head_camera')
         
     def close(self):
         self._subscriber_manager.close()
@@ -730,6 +745,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', type=str, default='192.168.123.164', help='IP address of image server')
+    parser.add_argument('--ir-only', action='store_true', help='Display only enabled infrared streams')
     args = parser.parse_args()
 
     # Example usage with three camera streams
@@ -738,7 +754,7 @@ def main():
 
     running = True
     while running:
-        if cam_config['head_camera']['enable_zmq']:
+        if not args.ir_only and cam_config['head_camera']['enable_zmq']:
             head_img = client.get_head_frame()
             if head_img.bgr is not None:
                 logger_mp.info(f"Head Camera FPS: {head_img.fps:.2f}")
@@ -746,14 +762,20 @@ def main():
                 logger_mp.debug(f"Head Camera Binocular: {cam_config['head_camera']['binocular']}")
                 cv2.imshow("Head Camera", head_img.bgr)
 
-        if cam_config['left_wrist_camera']['enable_zmq']:
+        if cam_config['head_camera'].get('enable_ir', False):
+            ir_img = client.get_head_ir_frame()
+            if ir_img.bgr is not None:
+                logger_mp.info(f"Head IR Camera FPS: {ir_img.fps:.2f}")
+                cv2.imshow("Head IR Camera", ir_img.bgr)
+
+        if not args.ir_only and cam_config.get('left_wrist_camera', {}).get('enable_zmq', False):
             left_wrist_img = client.get_left_wrist_frame()
             if left_wrist_img.bgr is not None:
                 logger_mp.info(f"Left Wrist Camera FPS: {left_wrist_img.fps:.2f}")
                 logger_mp.debug(f"Left Wrist Camera Shape: {cam_config['left_wrist_camera']['image_shape']}")
                 cv2.imshow("Left Wrist Camera", left_wrist_img.bgr)
 
-        if cam_config['right_wrist_camera']['enable_zmq']:
+        if not args.ir_only and cam_config.get('right_wrist_camera', {}).get('enable_zmq', False):
             right_wrist_img = client.get_right_wrist_frame()
             if right_wrist_img.bgr is not None:
                 logger_mp.info(f"Right Wrist Camera FPS: {right_wrist_img.fps:.2f}")
